@@ -100,16 +100,31 @@ class CookieManager:
         return context
     
     async def verify_cookie_douyin(self, cookie_path: Path) -> bool:
-        """验证抖音 Cookie 是否有效"""
+        """验证抖音 Cookie 是否有效 - 使用完整浏览器环境配置"""
         async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(headless=True)
-            context = await browser.new_context(storage_state=str(cookie_path))
+            browser = await playwright.chromium.launch(
+                headless=False,
+                channel='chrome'
+            )
+            context = await browser.new_context(
+                storage_state=str(cookie_path),
+                viewport={'width': 1920, 'height': 1080},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+                locale='en-US',
+                timezone_id='Asia/Shanghai',
+                extra_http_headers={
+                    'Accept-Language': 'en-US,en;q=0.9',
+                },
+            )
             context = await set_init_script(context)
             page = await context.new_page()
             
             try:
                 await page.goto("https://creator.douyin.com/creator-micro/content/upload")
                 await page.wait_for_url("https://creator.douyin.com/creator-micro/content/upload", timeout=5000)
+                
+                # 等待页面完全加载
+                await page.wait_for_timeout(3000)
                 
                 # 检查是否出现登录提示
                 try:
@@ -289,10 +304,32 @@ class CookieManager:
         logger.info(f"[Cookie] 打开浏览器进行 {platform} 登录...")
         
         async with async_playwright() as playwright:
-            # 使用非无头模式
+            # 使用非无头模式 + 完整浏览器配置
             browser_type = playwright.firefox if platform == 'tiktok' else playwright.chromium
-            browser = await browser_type.launch(headless=False)
-            context = await browser.new_context()
+            
+            if platform == 'tiktok':
+                browser = await browser_type.launch(headless=False)
+                context = await browser.new_context(
+                    viewport={'width': 1920, 'height': 1080},
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Firefox/120.0',
+                    locale='en-US',
+                    timezone_id='America/New_York',
+                    extra_http_headers={
+                        'Accept-Language': 'en-US,en;q=0.9',
+                    },
+                )
+            else:
+                browser = await browser_type.launch(headless=False, channel='chrome')
+                context = await browser.new_context(
+                    viewport={'width': 1920, 'height': 1080},
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+                    locale='en-US',
+                    timezone_id='Asia/Shanghai',
+                    extra_http_headers={
+                        'Accept-Language': 'en-US,en;q=0.9',
+                    },
+                )
+            
             context = await set_init_script(context)
             page = await context.new_page()
             

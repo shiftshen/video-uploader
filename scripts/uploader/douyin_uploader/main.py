@@ -1,26 +1,77 @@
 # -*- coding: utf-8 -*-
 from datetime import datetime
-
-from playwright.async_api import Playwright, async_playwright, Page, TimeoutError as PlaywrightTimeoutError
 import os
 import asyncio
+import uuid
+import subprocess
+
+from playwright.async_api import Playwright, async_playwright, Page, TimeoutError as PlaywrightTimeoutError
 
 from conf import LOCAL_CHROME_PATH
 from utils.base_social_media import set_init_script
 from utils.log import douyin_logger
 
 
+async def extract_thumbnail_from_video(video_path: str, output_path: str = None) -> str:
+    """
+    从视频中截取一帧作为封面
+    
+    Args:
+        video_path: 视频文件路径
+        output_path: 输出封面路径（可选）
+    
+    Returns:
+        封面文件路径
+    """
+    if output_path is None:
+        output_path = f"/tmp/thumbnail_{uuid.uuid4().hex[:8]}.jpg"
+    
+    # 使用 ffmpeg 截取视频第1秒的一帧
+    cmd = [
+        'ffmpeg', '-ss', '00:00:01', '-i', video_path,
+        '-vframes', '1', '-q:v', '2', output_path,
+        '-y'  # 覆盖已存在的文件
+    ]
+    
+    try:
+        await asyncio.to_thread(subprocess.run, cmd, check=True, capture_output=True, timeout=30)
+        if os.path.exists(output_path):
+            douyin_logger.info(f"[+] 已从视频截取封面: {output_path}")
+            return output_path
+    except subprocess.CalledProcessError as e:
+        douyin_logger.error(f"[-] 截取封面失败: {e}")
+    except FileNotFoundError:
+        douyin_logger.warning("[-] ffmpeg 未安装，无法自动截取封面")
+    
+    return None
+
+
 async def cookie_auth(account_file):
+    """验证 Cookie 有效性 - 使用完整的浏览器环境配置"""
     async with async_playwright() as playwright:
         if LOCAL_CHROME_PATH:
-            browser = await playwright.chromium.launch(headless=True, executable_path=LOCAL_CHROME_PATH)
+            browser = await playwright.chromium.launch(
+                headless=False,
+                executable_path=LOCAL_CHROME_PATH,
+                channel='chrome'
+            )
         else:
-            browser = await playwright.chromium.launch(headless=True)
-        context = await browser.new_context(storage_state=account_file)
+            browser = await playwright.chromium.launch(
+                headless=False,
+                channel='chrome'
+            )
+        context = await browser.new_context(
+            storage_state=account_file,
+            viewport={'width': 1920, 'height': 1080},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+            locale='en-US',
+            timezone_id='Asia/Shanghai',
+            extra_http_headers={
+                'Accept-Language': 'en-US,en;q=0.9',
+            },
+        )
         context = await set_init_script(context)
-        # 创建一个新的页面
         page = await context.new_page()
-        # 访问指定的 URL
         await page.goto("https://creator.douyin.com/creator-micro/content/upload")
         try:
             await page.wait_for_url("https://creator.douyin.com/creator-micro/content/upload", timeout=5000)
@@ -38,33 +89,63 @@ async def cookie_auth(account_file):
             return True
 
 
-async def douyin_setup(account_file, handle=False):
-    if not os.path.exists(account_file) or not await cookie_auth(account_file):
+async def douyin_setup(video, handle=False):
+    """
+    设置并上传视频到抖音
+    
+    Args:
+        video: DouYinVideo 对象，包含上传所需的所有信息
+        handle: 是否自动处理登录
+    """
+    account_file = video.account_file
+    
+    # 检查 Cookie 文件是否存在
+    if not os.path.exists(account_file):
         if not handle:
-            # Todo alert message
             return False
-        douyin_logger.info('[+] cookie文件不存在或已失效，即将自动打开浏览器，请扫码登录，登陆后会自动生成cookie文件')
+        douyin_logger.info('[+] cookie文件不存在，即将自动打开浏览器，请扫码登录')
         await douyin_cookie_gen(account_file)
-    return True
+    
+    # 跳过 cookie_auth 验证，直接尝试上传（避免超时）
+    # 如果 Cookie 无效，上传页面会提示登录
+    
+    # 创建 playwright 实例并执行上传
+    async with async_playwright() as p:
+        result = await video.upload(p)
+        return result
 
 
 async def douyin_cookie_gen(account_file):
+    """生成 Cookie - 使用完整的浏览器环境配置"""
     async with async_playwright() as playwright:
-        options = {
-            'headless': False
-        }
         if LOCAL_CHROME_PATH:
-            browser = await playwright.chromium.launch(executable_path=LOCAL_CHROME_PATH, **options)
+            browser = await playwright.chromium.launch(
+                headless=False,
+                executable_path=LOCAL_CHROME_PATH,
+                channel='chrome'
+            )
         else:
-            browser = await playwright.chromium.launch(**options)
-        # Setup context however you like.
-        context = await browser.new_context()  # Pass any options
+            browser = await playwright.chromium.launch(
+                headless=False,
+                channel='chrome'
+            )
+        
+        # 使用完整的浏览器环境配置
+        context = await browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+            locale='en-US',
+            timezone_id='Asia/Shanghai',
+            extra_http_headers={
+                'Accept-Language': 'en-US,en;q=0.9',
+            },
+        )
         context = await set_init_script(context)
-        # Pause the page, and start recording manually.
+        
         page = await context.new_page()
         await page.goto("https://creator.douyin.com/")
         await page.pause()
-        # 点击调试器的继续，保存cookie
+        # 保存cookie
         await context.storage_state(path=account_file)
 
 
@@ -103,12 +184,31 @@ class DouYinVideo(object):
 
     async def upload(self, playwright: Playwright) -> None:
         # 使用 Chromium 浏览器启动一个浏览器实例
+        # 关键配置：使用 chrome channel + 完整环境参数
         if self.local_executable_path:
-            browser = await playwright.chromium.launch(headless=False, executable_path=self.local_executable_path)
+            browser = await playwright.chromium.launch(
+                headless=False,
+                executable_path=self.local_executable_path,
+                channel='chrome'  # 使用 Chrome channel 避免被检测
+            )
         else:
-            browser = await playwright.chromium.launch(headless=False)
-        # 创建一个浏览器上下文，使用指定的 cookie 文件
-        context = await browser.new_context(storage_state=f"{self.account_file}")
+            browser = await playwright.chromium.launch(
+                headless=False,
+                channel='chrome'
+            )
+        
+        # 创建一个浏览器上下文，使用指定的 cookie 文件 + 完整环境参数
+        context = await browser.new_context(
+            storage_state=f"{self.account_file}",
+            viewport={'width': 1920, 'height': 1080},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+            locale='en-US',
+            timezone_id='Asia/Shanghai',
+            extra_http_headers={
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            },
+        )
         context = await set_init_script(context)
 
         # 创建一个新的页面
@@ -187,11 +287,15 @@ class DouYinVideo(object):
             await description_editor.type(self.title)
             await description_editor.type("\n")
 
-        for index, tag in enumerate(self.tags, start=1):
+        # 限制最多5个标签
+        max_tags = 5
+        tags_to_add = self.tags[:max_tags]
+        
+        for index, tag in enumerate(tags_to_add, start=1):
             await description_editor.type(f"#{tag} ")
             await page.wait_for_timeout(200)  # brief pause to let Douyin suggestion panel settle
         await page.wait_for_timeout(1000)  # ensure the editor syncs before proceeding
-        douyin_logger.info(f'总共添加{len(self.tags)}个话题')
+        douyin_logger.info(f'总共添加{len(tags_to_add)}个话题（最多5个）')
         while True:
             # 判断重新上传按钮是否存在，如果不存在，代表视频正在上传，则等待
             try:
@@ -216,8 +320,18 @@ class DouYinVideo(object):
             await self.set_product_link(page, self.productLink, self.productTitle)
             douyin_logger.info(f'  [+] 完成设置商品链接...')
         
-        #上传视频封面
+        # 上传视频封面
         await self.set_thumbnail(page, self.thumbnail_path)
+        
+        # 验证封面是否已设置
+        thumbnail_verified = await self.verify_thumbnail(page)
+        if not thumbnail_verified:
+            douyin_logger.error("  [-] 封面未设置，请手动选择封面后告诉我继续")
+            await page.pause()
+            # 再次验证
+            thumbnail_verified = await self.verify_thumbnail(page)
+            if not thumbnail_verified:
+                raise RuntimeError("封面设置验证失败，无法继续发布")
 
         # 更换可见元素
         await self.set_location(page, "")
@@ -231,24 +345,60 @@ class DouYinVideo(object):
             if 'semi-switch-checked' not in await page.eval_on_selector(third_part_element, 'div => div.className'):
                 await page.locator(third_part_element).locator('input.semi-switch-native-control').click()
 
-        if self.publish_date != 0:
-            await self.set_schedule_time_douyin(page, self.publish_date)
+        # 如果设置了定时发布时间（不是默认值 0），则设置定时
+        # 注意：upload.py 传入的是 None，表示立即发布
+        # 如果 publish_date 为 None，表示立即发布，跳过定时设置
+        if self.publish_date is None:
+            douyin_logger.info("  [-] 设置为立即发布")
+        elif isinstance(self.publish_date, datetime):
+            # 只有明确设置了未来时间才设置定时
+            if self.publish_date > datetime.now():
+                await self.set_schedule_time_douyin(page, self.publish_date)
+            else:
+                douyin_logger.info("  [-] 发布时间已过，将立即发布")
 
+        # 等待封面设置完成并检查发布按钮状态
+        douyin_logger.info("  [-] 等待封面设置完成...")
+        await page.wait_for_timeout(2000)
+        
+        # 验证封面已设置
+        if not await self.verify_thumbnail(page):
+            douyin_logger.warning("  [-] 封面可能未设置，请检查...")
+        
+        # 等待发布按钮可用
+        douyin_logger.info("  [-] 等待发布按钮可用...")
+        for i in range(30):  # 最多等待30秒
+            publish_button = page.get_by_role('button', name="发布", exact=True)
+            if await publish_button.count():
+                button = publish_button.first
+                is_disabled = await button.get_attribute('disabled')
+                if is_disabled is None or is_disabled == 'false':
+                    douyin_logger.info("  [-] 发布按钮已可用")
+                    break
+            await asyncio.sleep(1)
+        
         # 判断视频是否发布成功
         while True:
-            # 判断视频是否发布成功
             try:
                 publish_button = page.get_by_role('button', name="发布", exact=True)
                 if await publish_button.count():
-                    await publish_button.click()
+                    button = publish_button.first
+                    is_disabled = await button.get_attribute('disabled')
+                    if is_disabled is None or is_disabled == 'false':
+                        await button.click()
+                        douyin_logger.info("  [-] 已点击发布按钮")
+                    else:
+                        douyin_logger.warning("  [-] 发布按钮仍处于禁用状态，请检查封面或其他必填项")
+                        await page.pause()
+                
                 await page.wait_for_url("https://creator.douyin.com/creator-micro/content/manage**",
-                                        timeout=3000)  # 如果自动跳转到作品页面，则代表发布成功
+                                        timeout=5000)
                 douyin_logger.success("  [-]视频发布成功")
                 break
-            except:
+            except Exception as e:
                 douyin_logger.info("  [-] 视频正在发布中...")
-                await page.screenshot(full_page=True)
-                await asyncio.sleep(0.5)
+                await page.screenshot(full_page=True, path='/tmp/douyin_publish_status.png')
+                await asyncio.sleep(1)
 
         await context.storage_state(path=self.account_file)  # 保存cookie
         douyin_logger.success('  [-]cookie更新完毕！')
@@ -258,23 +408,95 @@ class DouYinVideo(object):
         await browser.close()
     
     async def set_thumbnail(self, page: Page, thumbnail_path: str):
-        if thumbnail_path:
-            douyin_logger.info('  [-] 正在设置视频封面...')
+        """设置视频封面 - 设置竖屏+横屏封面，等待弹窗关闭"""
+        
+        # 如果没有提供封面，从视频截取
+        if not thumbnail_path:
+            thumbnail_path = await extract_thumbnail_from_video(self.file_path)
+        
+        if thumbnail_path and os.path.exists(thumbnail_path):
+            douyin_logger.info(f'  [-] 正在设置视频封面...')
             await page.click('text="选择封面"')
-            await page.wait_for_selector("div.dy-creator-content-modal")
+            await page.wait_for_selector("div.dy-creator-content-modal >> text=设置竖封面", timeout=5000)
+            
+            # 设置竖屏封面
             await page.click('text="设置竖封面"')
-            await page.wait_for_timeout(2000)  # 等待2秒
-            # 定位到上传区域并点击
+            await page.wait_for_timeout(2000)
             await page.locator("div[class^='semi-upload upload'] >> input.semi-upload-hidden-input").set_input_files(thumbnail_path)
-            await page.wait_for_timeout(2000)  # 等待2秒
-            await page.locator("div#tooltip-container button:visible:has-text('完成')").click()
-            # finish_confirm_element = page.locator("div[class^='confirmBtn'] >> div:has-text('完成')")
-            # if await finish_confirm_element.count():
-            #     await finish_confirm_element.click()
-            # await page.locator("div[class^='footer'] button:has-text('完成')").click()
-            douyin_logger.info('  [+] 视频封面设置完成！')
-            # 等待封面设置对话框关闭
-            await page.wait_for_selector("div.extractFooter", state='detached')
+            await page.wait_for_timeout(3000)
+            douyin_logger.info('  [+] 竖屏封面已选择')
+            
+            # 设置横屏封面
+            try:
+                await page.click('text="设置横封面"')
+                await page.wait_for_timeout(2000)
+                await page.locator("div[class^='semi-upload upload'] >> input.semi-upload-hidden-input").set_input_files(thumbnail_path)
+                await page.wait_for_timeout(3000)
+                douyin_logger.info('  [+] 横屏封面已选择')
+            except Exception as e:
+                douyin_logger.warning(f'  [-] 横屏封面设置跳过: {e}')
+            
+            # 点击完成按钮 - 使用更通用的选择器
+            try:
+                # 尝试多种完成按钮选择器
+                complete_btn = page.locator("button:has-text('完成'):visible")
+                if await complete_btn.count() == 0:
+                    complete_btn = page.locator("button.semi-button-primary:has-text('完成'):visible")
+                if await complete_btn.count() == 0:
+                    complete_btn = page.locator(".semi-modal-footer button:has-text('完成'):visible")
+                if await complete_btn.count() == 0:
+                    complete_btn = page.locator("footer button:has-text('完成'):visible")
+                
+                if await complete_btn.count() > 0:
+                    await complete_btn.first.click()
+                    douyin_logger.info('  [+] 已点击完成按钮')
+                else:
+                    douyin_logger.warning('  [-] 未找到完成按钮')
+            except Exception as e:
+                douyin_logger.warning(f'  [-] 点击完成按钮失败: {e}')
+            
+            douyin_logger.info('  [+] 封面设置完成')
+            
+            # 等待弹窗完全关闭 - 关键步骤
+            try:
+                await page.wait_for_selector("div.dy-creator-content-modal", state='hidden', timeout=15000)
+                douyin_logger.info('  [+] 封面弹窗已关闭')
+            except Exception as e:
+                douyin_logger.warning(f'  [-] 等待弹窗关闭超时: {e}')
+                # 尝试点击空白区域关闭
+                await page.click("body", position={"x": 10, "y": 10})
+                await page.wait_for_timeout(2000)
+            
+            await page.wait_for_timeout(1500)  # 确保界面完全稳定
+        else:
+            # 没有封面图，等待用户手动选择
+            douyin_logger.warning('  [-] 未找到封面图，请手动选择封面...')
+            await page.click('text="选择封面"')
+            await page.wait_for_selector("div.dy-creator-content-modal", timeout=5000)
+            await page.wait_for_timeout(2000)
+            # 等待用户操作
+            douyin_logger.info('  [-] 请手动选择封面，完成后告诉我继续发布')
+            await page.pause()
+    
+    async def verify_thumbnail(self, page: Page) -> bool:
+        """验证封面是否已设置"""
+        try:
+            # 检查是否有封面预览图
+            cover_preview = page.locator("div[class*='coverPreview'], div[class*='cover-preview'], img[class*='cover']")
+            if await cover_preview.count() > 0:
+                return True
+            
+            # 检查封面选择按钮是否显示"已选择"
+            cover_btn = page.locator("text=选择封面")
+            if await cover_btn.count() > 0:
+                btn_text = await cover_btn.first.inner_text()
+                if "已选择" in btn_text or "修改" in btn_text:
+                    return True
+            
+            return False
+        except Exception as e:
+            douyin_logger.error(f"[-] 验证封面失败: {e}")
+            return False
             
 
     async def set_location(self, page: Page, location: str = ""):

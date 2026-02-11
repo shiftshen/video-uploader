@@ -30,15 +30,9 @@ async def upload_douyin(args):
         if not success:
             logger.error(f"[抖音] 登录失败")
             return False
-    else:
-        # 验证 Cookie
-        is_valid = await cookie_manager.verify_cookie("douyin", args.account)
-        if not is_valid:
-            logger.warning(f"[抖音] Cookie 已失效，需要重新登录")
-            success = await cookie_manager.login_and_save_cookie("douyin", args.account)
-            if not success:
-                logger.error(f"[抖音] 登录失败")
-                return False
+    
+    logger.info(f"[抖音] Cookie 文件存在: {account_file}")
+    # 注意：跳过 verify_cookie 避免超时，直接尝试上传
     
     # 准备上传参数
     publish_date = None
@@ -48,12 +42,12 @@ async def upload_douyin(args):
         except:
             logger.warning(f"[抖音] 发布时间格式错误，将立即发布")
     
-    # 创建视频对象
+    # 创建视频对象 - publish_date=None 表示立即发布
     video = DouYinVideo(
         title=args.title,
         file_path=args.video,
         tags=args.tags.split(',') if args.tags else [],
-        publish_date=publish_date or datetime.now(),
+        publish_date=None,  # 立即发布
         account_file=str(account_file),
         thumbnail_path=args.thumbnail,
         productLink=args.product_link or '',
@@ -253,8 +247,8 @@ def main():
     parser.add_argument('--platform', required=True, 
                        choices=['douyin', 'kuaishou', 'tiktok', 'tencent', 'xhs'],
                        help='上传平台')
-    parser.add_argument('--video', required=True, help='视频文件路径')
-    parser.add_argument('--title', required=True, help='视频标题')
+    parser.add_argument('--video', help='视频文件路径')
+    parser.add_argument('--title', help='视频标题')
     
     # 可选参数
     parser.add_argument('--tags', help='标签（逗号分隔）')
@@ -297,6 +291,12 @@ def main():
         else:
             print(f"❌ {args.platform} 账号 {args.account} 登录失败")
         return
+    
+    # 检查必需参数
+    if not args.video or not args.title:
+        print("❌ 错误: --video 和 --title 参数不能为空")
+        print("💡 使用 --login 进行登录（不需要 --video 和 --title）")
+        sys.exit(1)
     
     # 上传视频
     upload_funcs = {
