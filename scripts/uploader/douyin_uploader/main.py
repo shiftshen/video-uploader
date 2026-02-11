@@ -9,6 +9,7 @@ from conf import LOCAL_CHROME_PATH
 from utils.base_social_media import set_init_script
 from utils.log import douyin_logger
 from utils.browser_setup import get_browser_context, handle_permissions_dialog, wait_for_video_preview
+from utils.video_utils import capture_thumbnail_from_video, select_platform_generated_cover
 
 
 async def cookie_auth(account_file):
@@ -224,8 +225,8 @@ class DouYinVideo(object):
             await self.set_product_link(page, self.productLink, self.productTitle)
             douyin_logger.info(f'  [+] 完成设置商品链接...')
         
-        #上传视频封面
-        await self.set_thumbnail(page, self.thumbnail_path)
+        # 上传视频封面（必须设置封面）
+        await self.set_thumbnail_with_validation(page, self.thumbnail_path)
 
         # 更换可见元素
         await self.set_location(page, "")
@@ -265,24 +266,124 @@ class DouYinVideo(object):
         await context.close()
         await browser.close()
     
-    async def set_thumbnail(self, page: Page, thumbnail_path: str):
-        if thumbnail_path:
-            douyin_logger.info('  [-] 正在设置视频封面...')
+    async def set_thumbnail_with_validation(self, page: Page, thumbnail_path: str):
+        """
+        设置视频封面（必须设置）并验证设置成功
+        
+        如果用户没有提供封面，则自动从视频截取或选择平台生成的封面
+        验证“请设置封面后再发布”的弹窗消失后才认为成功
+        """
+        douyin_logger.info('  [-] 正在设置视频封面...')
+        
+        # 方案 1: 如果用户提供了封面图，使用用户提供的
+        if thumbnail_path and os.path.exists(thumbnail_path):
+            douyin_logger.info(f'  [-] 使用用户提供的封面: {thumbnail_path}')
+            success = await self.set_thumbnail(page, thumbnail_path)
+            if success and await self.verify_thumbnail_set(page):
+                douyin_logger.success('  [+] 视频封面设置完成！')
+                return
+        
+        # 方案 2: 尝试选择平台自动生成的封面
+        douyin_logger.info('  [-] 尝试选择平台生成的封面...')
+        if await select_platform_generated_cover(page, cover_type="vertical"):
+            if await self.verify_thumbnail_set(page):
+                douyin_logger.success('  [+] 成功选择平台生成的封面！')
+                return
+        
+        # 方案 3: 从视频预览截取封面
+        douyin_logger.info('  [-] 尝试从视频预览截取封面...')
+        try:
+            # 截取封面
+            temp_thumbnail = await capture_thumbnail_from_video(page)
+            douyin_logger.info(f'  [-] 成功截取封面: {temp_thumbnail}')
+            
+            # 上传截取的封面
+            success = await self.set_thumbnail(page, temp_thumbnail)
+            if success and await self.verify_thumbnail_set(page):
+                douyin_logger.success('  [+] 视频封面设置完成！')
+                # 清理临时文件
+                try:
+                    os.remove(temp_thumbnail)
+                except:
+                    pass
+                return
+        except Exception as e:
+            douyin_logger.error(f'  [-] 从视频截取封面失败: {e}')
+        
+        # 如果所有方案都失败，抛出异常
+        raise Exception("无法设置视频封面，请检查视频是否正常加载")
+    
+    async def verify_thumbnail_set(self, page: Page) -> bool:
+        """
+        验证封面是否设置成功
+        
+        通过检查“请设置封面后再发布”的弹窗是否消失
+        """
+        try:
+            # 等待一下让页面更新
+            await page.wait_for_timeout(1000)
+            
+            # 检查是否还有“请设置封面后再发布”的提示
+            warning_selectors = [
+                'text="请设置封面后再发布"',
+                'text="请设置封面"',
+                'div:has-text("请设置封面")'
+            ]
+            
+            for selector in warning_selectors:
+                count = await page.locator(selector).count()
+                if count > 0:
+                    douyin_logger.warning('  [!] 封面设置未生效，仍有提示弹窗')
+                    return False
+            
+            # 检查封面选择按钮的状态（如果设置成功，按钮文本可能会变为“更改封面”）
+            change_cover_count = await page.locator('text="更改封面"').count()
+            if change_cover_count > 0:
+                douyin_logger.success('  [+] 封面设置成功（检测到“更改封面”按钮）')
+                return True
+            
+            # 如果没有警告信息，认为设置成功
+            douyin_logger.success('  [+] 封面设置成功（无警告信息）')
+            return True
+            
+        except Exception as e:
+            douyin_logger.error(f'  [-] 验证封面设置失败: {e}')
+            return False
+    
+    async def set_thumbnail(self, page: Page, thumbnail_path: str) -> bool:
+        """
+        设置视频封面（原始方法）
+        
+        Returns:
+            bool: 是否成功
+        """
+        if not thumbnail_path:
+            return False
+            
+        try:
+            douyin_logger.info(f'  [-] 正在上传封面: {thumbnail_path}')
             await page.click('text="选择封面"')
-            await page.wait_for_selector("div.dy-creator-content-modal")
+            await page.wait_for_selector("div.dy-creator-content-modal", timeout=5000)
             await page.click('text="设置竖封面"')
             await page.wait_for_timeout(2000)  # 等待2秒
+            
             # 定位到上传区域并点击
             await page.locator("div[class^='semi-upload upload'] >> input.semi-upload-hidden-input").set_input_files(thumbnail_path)
             await page.wait_for_timeout(2000)  # 等待2秒
+            
+            # 点击完成按钮
             await page.locator("div#tooltip-container button:visible:has-text('完成')").click()
-            # finish_confirm_element = page.locator("div[class^='confirmBtn'] >> div:has-text('完成')")
-            # if await finish_confirm_element.count():
-            #     await finish_confirm_element.click()
-            # await page.locator("div[class^='footer'] button:has-text('完成')").click()
-            douyin_logger.info('  [+] 视频封面设置完成！')
+            
+            douyin_logger.info('  [+] 封面上传完成')
+            
             # 等待封面设置对话框关闭
-            await page.wait_for_selector("div.extractFooter", state='detached')
+            await page.wait_for_selector("div.extractFooter", state='detached', timeout=5000)
+            
+            return True
+            
+        except Exception as e:
+            douyin_logger.error(f'  [-] 设置封面失败: {e}')
+            return False
             
 
     async def set_location(self, page: Page, location: str = ""):
