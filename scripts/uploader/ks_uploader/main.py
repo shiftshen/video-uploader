@@ -9,6 +9,7 @@ from conf import LOCAL_CHROME_PATH
 from utils.base_social_media import set_init_script
 from utils.files_times import get_absolute_path
 from utils.log import kuaishou_logger
+from utils.browser_setup import get_browser_context, handle_permissions_dialog, wait_for_video_preview
 
 
 async def cookie_auth(account_file):

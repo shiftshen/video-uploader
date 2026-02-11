@@ -8,16 +8,18 @@ import asyncio
 from conf import LOCAL_CHROME_PATH
 from utils.base_social_media import set_init_script
 from utils.log import douyin_logger
+from utils.browser_setup import get_browser_context, handle_permissions_dialog, wait_for_video_preview
 
 
 async def cookie_auth(account_file):
     async with async_playwright() as playwright:
-        if LOCAL_CHROME_PATH:
-            browser = await playwright.chromium.launch(headless=True, executable_path=LOCAL_CHROME_PATH)
-        else:
-            browser = await playwright.chromium.launch(headless=True)
-        context = await browser.new_context(storage_state=account_file)
-        context = await set_init_script(context)
+        browser, context = await get_browser_context(
+            playwright=playwright,
+            account_file=account_file,
+            headless=True,
+            locale="zh-CN",
+            use_chrome=True
+        )
         # 创建一个新的页面
         page = await context.new_page()
         # 访问指定的 URL
@@ -50,16 +52,13 @@ async def douyin_setup(account_file, handle=False):
 
 async def douyin_cookie_gen(account_file):
     async with async_playwright() as playwright:
-        options = {
-            'headless': False
-        }
-        if LOCAL_CHROME_PATH:
-            browser = await playwright.chromium.launch(executable_path=LOCAL_CHROME_PATH, **options)
-        else:
-            browser = await playwright.chromium.launch(**options)
-        # Setup context however you like.
-        context = await browser.new_context()  # Pass any options
-        context = await set_init_script(context)
+        browser, context = await get_browser_context(
+            playwright=playwright,
+            account_file=account_file,
+            headless=False,
+            locale="zh-CN",
+            use_chrome=True
+        )
         # Pause the page, and start recording manually.
         page = await context.new_page()
         await page.goto("https://creator.douyin.com/")
@@ -102,17 +101,20 @@ class DouYinVideo(object):
         await page.locator('div.progress-div [class^="upload-btn-input"]').set_input_files(self.file_path)
 
     async def upload(self, playwright: Playwright) -> None:
-        # 使用 Chromium 浏览器启动一个浏览器实例
-        if self.local_executable_path:
-            browser = await playwright.chromium.launch(headless=False, executable_path=self.local_executable_path)
-        else:
-            browser = await playwright.chromium.launch(headless=False)
-        # 创建一个浏览器上下文，使用指定的 cookie 文件
-        context = await browser.new_context(storage_state=f"{self.account_file}")
-        context = await set_init_script(context)
+        # 使用完整配置的浏览器上下文
+        browser, context = await get_browser_context(
+            playwright=playwright,
+            account_file=self.account_file,
+            headless=False,
+            locale="zh-CN",
+            use_chrome=True
+        )
 
         # 创建一个新的页面
         page = await context.new_page()
+        
+        # 处理权限弹窗
+        await handle_permissions_dialog(page)
         # 访问指定的 URL
         await page.goto("https://creator.douyin.com/creator-micro/content/upload")
         douyin_logger.info(f'[+]正在上传-------{self.title}.mp4')
@@ -199,6 +201,12 @@ class DouYinVideo(object):
                 number = await page.locator('[class^="long-card"] div:has-text("重新上传")').count()
                 if number > 0:
                     douyin_logger.success("  [-]视频上传完毕")
+                    # 等待视频预览加载
+                    douyin_logger.info("  [-] 等待视频预览加载...")
+                    if await wait_for_video_preview(page, timeout=30000):
+                        douyin_logger.success("  [+] 视频预览加载成功")
+                    else:
+                        douyin_logger.warning("  [!] 视频预览加载超时，但继续执行")
                     break
                 else:
                     douyin_logger.info("  [-] 正在上传视频中...")
